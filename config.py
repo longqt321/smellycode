@@ -20,4 +20,4 @@ ARTIFACTS_DIR=os.path.join(VOLUME_MOUNT_PATH,"artifacts")
 
 # Model config
 USE_RELU=True
-ACTIVATION=nn.ReLU() if USE_RELU else nn.Mish()
+ACTIVATION = nn.ReLU if USE_RELU else nn.Mish

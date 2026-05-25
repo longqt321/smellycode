@@ -1,5 +1,5 @@
-```
-# Compiled and build artifacts
+```gitignore
+# Compiled Python files
 *.pyc
 __pycache__/
 
@@ -10,10 +10,13 @@ venv/
 .env.local
 .env.*
 
-# Logs and temp files
+# Build/dist directories
+dist/
+build/
+target/
+
+# Logs
 *.log
-*.tmp
-*.swp
 
 # Editors
 .vscode/
@@ -24,8 +27,7 @@ venv/
 coverage/
 htmlcov/
 
-# Distribution artifacts
-dist/
-build/
-*.egg-info/
+# Python cache
+.mypy_cache/
+.pytest_cache/
 ```

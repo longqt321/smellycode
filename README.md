@@ -44,6 +44,7 @@ smellycode/
 │   ├── __init__.py
 │   ├── data.py            # Dataset and DataLoader utilities
 │   ├── data_utils.py      # Additional data utilities
+│   ├── cached_dataset.py  # Cached dataset for pre-computed embeddings
 │   ├── analysis/          # Evaluation and analysis tools
 │   │   ├── evaluation.py
 │   │   ├── feature_stats.py
@@ -55,10 +56,12 @@ smellycode/
 │   │   └── focal_loss.py  # Focal loss implementation
 │   └── networks/
 │       ├── dcn.py         # DCNv2 model architecture
-│       └── fusion.py      # Fusion network architecture
+│       └── fusion.py      # Fusion network architecture (DCNv2 + GraphCodeBERT)
 ├── config.py              # Training and model configurations
 ├── train.py               # Main training script
+├── precompute_embeddings.py  # Pre-compute GraphCodeBERT embeddings
 ├── modal_train.py         # Modal cloud training script
+├── modal_precompute.py    # Modal cloud pre-computation script
 ├── analyze.py             # Analysis script
 ├── pyproject.toml         # Project metadata and dependencies
 ├── uv.lock                # Locked dependencies
@@ -108,16 +111,57 @@ model = DCNv2(
 
 ### Training
 
-Run training locally:
+#### Step 1: Pre-compute Embeddings (Required for Fusion Model)
 
+Before training the fusion model, you must pre-compute GraphCodeBERT embeddings and cache them to disk. This is a one-time operation that significantly speeds up training.
+
+**Local execution:**
+```bash
+python precompute_embeddings.py --max_length 512 --batch_size 64
+```
+
+**Cloud execution (Modal):**
+```bash
+modal run modal_precompute.py
+```
+
+This will:
+- Load GraphCodeBERT-base and freeze it completely
+- Extract [CLS] embeddings using FP16 autocast for faster inference
+- Cache embeddings to `cache/train_cached.pt`, `cache/val_cached.pt`, `cache/test_cached.pt`
+
+#### Step 2: Train the Model
+
+**Train DCNv2 only (metrics-based):**
 ```bash
 python train.py
 ```
 
-Or on Modal cloud:
-
+**Train Fusion model (metrics + semantic embeddings):**
 ```bash
+python train.py --use_semantic --embed_dim 128 --max_length 512
+```
+
+**Cloud training with Modal:**
+```bash
+# DCNv2 only
 modal run modal_train.py
+
+# Fusion model
+modal run modal_train.py --use-semantic --embed-dim 128
+```
+
+**Training options:**
+```bash
+python train.py --help
+  --cross_type {standard,gated}   # Cross layer type
+  --deep_type {bottleneck,moe}    # Deep layer type
+  --use_semantic                  # Enable fusion with GraphCodeBERT
+  --embed_dim INT                 # Embedding dimension (default: 128)
+  --loss {bce,focal,asl}          # Loss function
+  --epochs INT                    # Number of epochs
+  --batch_size INT                # Batch size
+  --lr FLOAT                      # Learning rate
 ```
 
 ### Analysis

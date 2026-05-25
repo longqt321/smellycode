@@ -86,36 +86,28 @@ def run_once(args, seed: int) -> dict:
     print(f"\n[Seed {seed}] device={device} | Cross={args.cross_type} | Deep={args.deep_type} | Semantic={args.use_semantic}")
 
     if args.use_semantic:
-        from torch.utils.data import DataLoader, TensorDataset
-        tokenizer = get_tokenizer()
-        raw_train, raw_val, raw_test, pos_weight = get_fusion_loaders(
-            batch_size=args.batch_size, num_workers=args.num_workers, tiny=args.tiny)
-
-        # Build a temp BERT model just for pre-computation
-        from transformers import AutoModel
-        bert_tmp = AutoModel.from_pretrained(GatedFusionModel.BERT_MODEL).to(device)
-        bert_tmp.eval()
-
-        print("Pre-computing BERT embeddings (train)...")
-        train_embeds = precompute_bert_embeddings(
-            raw_train.dataset.codes, tokenizer, bert_tmp, device, max_length=args.max_length)
-        print("Pre-computing BERT embeddings (val)...")
-        val_embeds = precompute_bert_embeddings(
-            raw_val.dataset.codes, tokenizer, bert_tmp, device, max_length=args.max_length)
-        print("Pre-computing BERT embeddings (test)...")
-        test_embeds = precompute_bert_embeddings(
-            raw_test.dataset.codes, tokenizer, bert_tmp, device, max_length=args.max_length)
-        del bert_tmp
-        torch.cuda.empty_cache() if device.type == 'cuda' else None
-
-        train_ds = TensorDataset(raw_train.dataset.features, train_embeds, raw_train.dataset.labels)
-        val_ds   = TensorDataset(raw_val.dataset.features,   val_embeds,   raw_val.dataset.labels)
-        test_ds  = TensorDataset(raw_test.dataset.features,  test_embeds,  raw_test.dataset.labels)
-
-        train_loader = DataLoader(train_ds, batch_size=args.batch_size, shuffle=True,  num_workers=args.num_workers)
-        val_loader   = DataLoader(val_ds,   batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-        test_loader  = DataLoader(test_ds,  batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
-        input_dim = train_ds.tensors[0].shape[1]
+        from torch.utils.data import DataLoader
+        from src.cached_dataset import get_cached_loaders
+        
+        # Check if cached embeddings exist
+        cache_dir = os.path.join(os.path.dirname(__file__), 'cache')
+        train_cache = os.path.join(cache_dir, 'train_cached.pt')
+        
+        if not os.path.exists(train_cache):
+            print("⚠️  Cached embeddings not found! Please run precompute_embeddings.py first:")
+            print("   python precompute_embeddings.py")
+            raise FileNotFoundError(f"Cached embeddings not found at {train_cache}")
+        
+        print(f"✅ Loading cached embeddings from {cache_dir}...")
+        train_loader, val_loader, test_loader = get_cached_loaders(
+            cache_dir, batch_size=args.batch_size, num_workers=args.num_workers)
+        
+        # Get input dimensions from cached data
+        sample_features, sample_embeds, _ = next(iter(train_loader))
+        input_dim = sample_features.shape[1]
+        bert_dim = sample_embeds.shape[1]
+        print(f"  Features dim: {input_dim}, BERT embed dim: {bert_dim}")
+        
         model = GatedFusionModel(input_dim=input_dim, embed_dim=args.embed_dim,
                                  cross_type=args.cross_type, deep_type=args.deep_type).to(device)
     else:
@@ -126,6 +118,13 @@ def run_once(args, seed: int) -> dict:
 
     if seed == args.seed[0]:
         print_model_summary(model)
+
+    # Get pos_weight from first batch for cached dataset
+    if args.use_semantic:
+        _, _, labels_batch = next(iter(train_loader))
+        y_train = labels_batch.numpy()
+        pos_weight = torch.tensor((1 - y_train).sum(axis=0) / (y_train.sum(axis=0) + 1e-6), dtype=torch.float32)
+        pos_weight = torch.sqrt(pos_weight)
 
     if args.loss == 'focal':
         criterion = MultilabelFocalLoss(gamma=args.focal_gamma, alpha=pos_weight.to(device))

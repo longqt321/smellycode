@@ -9,7 +9,7 @@ def plot_roc_curve(y_true: np.ndarray, y_scores: np.ndarray, labels: list):
     
     for i, label in enumerate(labels):
         fpr, tpr, _ = roc_curve(y_true[:, i], y_scores[:, i])
-        ax.plot(fpr, tpr, label=f'{label} (AUC={np.trapz(tpr, fpr):.3f})')
+        ax.plot(fpr, tpr, label=f'{label} (AUC={np.trapezoid(tpr, fpr):.3f})')
     
     ax.plot([0, 1], [0, 1], 'k--', label='Random')
     ax.set_xlabel('False Positive Rate')
@@ -27,7 +27,7 @@ def plot_precision_recall_curve(y_true: np.ndarray, y_scores: np.ndarray, labels
     
     for i, label in enumerate(labels):
         precision, recall, _ = precision_recall_curve(y_true[:, i], y_scores[:, i])
-        avg_precision = np.trapz(precision[:-1], recall[:-1])
+        avg_precision = np.trapezoid(precision[:-1], recall[:-1])
         ax.plot(recall, precision, label=f'{label} (AP={avg_precision:.3f})')
     
     ax.set_xlabel('Recall')

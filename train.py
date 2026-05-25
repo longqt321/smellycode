@@ -89,7 +89,6 @@ def run_once(args, seed: int, run) -> dict:
 
     if args.use_semantic:
         from src.cached_dataset import get_cached_loaders
-        
         # Detect if running on Modal (cache mounted at /app/cache)
         if os.path.exists('/app/cache'):
             cache_dir = '/app/cache'

@@ -7,12 +7,13 @@ image = modal.Image.debian_slim(python_version="3.13").uv_pip_install(
 ).env({"PYTHONPATH": "/app"}).add_local_dir(Path(__file__).parent, "/app", ignore=[".git", ".env", ".venv", ".vscode"])
 
 volume = modal.Volume.from_name("smellycode-data", create_if_missing=True)
+cache_volume = modal.Volume.from_name("smellycode-cache", create_if_missing=True)
 app = modal.App("code-smell-detection")
 
 
 @app.function(
     image=image,
-    volumes={"/mnt/data": volume},
+    volumes={"/mnt/data": volume,"/app/cache": cache_volume},
     secrets=[modal.Secret.from_name("wandb-secret")],
     gpu="T4",
     timeout=7200,

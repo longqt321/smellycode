@@ -3,13 +3,16 @@ import argparse
 import torch
 import torch.nn as nn
 import numpy as np
+import wandb
+import sklearn.metrics
 from torch.amp import GradScaler
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
 from src.data import get_loaders, get_fusion_loaders
 from src.networks.dcn import DCNv2
 from src.networks.fusion import GatedFusionModel, get_tokenizer, precompute_bert_embeddings
 from src.analysis.model_summary import print_model_summary
-from src.analysis.evaluation import evaluate_per_label, tune_thresholds
+from src.analysis.evaluation import tune_thresholds
+from src.analysis.visualization import plot_roc_curve, plot_precision_recall_curve
 from src.losses.focal_loss import MultilabelFocalLoss, AsymmetricLoss
 from config import LABEL_COLUMNS, SEED
 
@@ -79,34 +82,26 @@ def eval_epoch(model, loader, criterion, device, use_semantic):
     return total_loss / len(loader), *compute_metrics(all_preds, all_labels), all_preds, all_labels
 
 
-def run_once(args, seed: int) -> dict:
+def run_once(args, seed: int, run) -> dict:
     torch.manual_seed(seed)
     np.random.seed(seed)
     device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-    print(f"\n[Seed {seed}] device={device} | Cross={args.cross_type} | Deep={args.deep_type} | Semantic={args.use_semantic}")
 
     if args.use_semantic:
-        from torch.utils.data import DataLoader
         from src.cached_dataset import get_cached_loaders
         
-        # Check if cached embeddings exist
         cache_dir = os.path.join(os.path.dirname(__file__), 'cache')
         train_cache = os.path.join(cache_dir, 'train_cached.pt')
         
         if not os.path.exists(train_cache):
-            print("⚠️  Cached embeddings not found! Please run precompute_embeddings.py first:")
-            print("   python precompute_embeddings.py")
-            raise FileNotFoundError(f"Cached embeddings not found at {train_cache}")
+            raise FileNotFoundError(f"Cached embeddings not found at {train_cache}. Run precompute_embeddings.py first.")
         
-        print(f"✅ Loading cached embeddings from {cache_dir}...")
         train_loader, val_loader, test_loader = get_cached_loaders(
             cache_dir, batch_size=args.batch_size, num_workers=args.num_workers)
         
-        # Get input dimensions from cached data
         sample_features, sample_embeds, _ = next(iter(train_loader))
         input_dim = sample_features.shape[1]
         bert_dim = sample_embeds.shape[1]
-        print(f"  Features dim: {input_dim}, BERT embed dim: {bert_dim}")
         
         model = GatedFusionModel(input_dim=input_dim, embed_dim=args.embed_dim,
                                  cross_type=args.cross_type, deep_type=args.deep_type).to(device)
@@ -119,7 +114,6 @@ def run_once(args, seed: int) -> dict:
     if seed == args.seed[0]:
         print_model_summary(model)
 
-    # Get pos_weight from first batch for cached dataset
     if args.use_semantic:
         _, _, labels_batch = next(iter(train_loader))
         y_train = labels_batch.numpy()
@@ -141,8 +135,8 @@ def run_once(args, seed: int) -> dict:
     scaler = GradScaler('cuda', enabled=args.use_semantic and device.type == 'cuda')
 
     best_val_auc, patience_counter = 0, 0
-    os.makedirs('artifacts', exist_ok=True)
     ckpt = f'artifacts/best_{"fusion" if args.use_semantic else "model"}_seed{seed}.pt'
+    os.makedirs('artifacts', exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
         train_loss, train_acc, train_f1_micro, train_f1_macro, train_auc_micro, train_auc_macro = train_epoch(
@@ -150,10 +144,24 @@ def run_once(args, seed: int) -> dict:
         val_loss, val_acc, val_f1_micro, val_f1_macro, val_auc_micro, val_auc_macro, _, _ = eval_epoch(
             model, val_loader, criterion, device, args.use_semantic)
         scheduler.step(val_loss)
-        print(f"Epoch {epoch:2d} | Train Loss {train_loss:.4f} Acc {train_acc:.3f} F1-micro {train_f1_micro:.3f} "
-              f"F1-macro {train_f1_macro:.3f} AUC-macro {train_auc_macro:.3f} | "
-              f"Val Loss {val_loss:.4f} Acc {val_acc:.3f} F1-micro {val_f1_micro:.3f} "
-              f"F1-macro {val_f1_macro:.3f} AUC-macro {val_auc_macro:.3f}")
+        
+        wandb.log({
+            'epoch': epoch,
+            'train/loss': train_loss,
+            'train/acc': train_acc,
+            'train/f1_micro': train_f1_micro,
+            'train/f1_macro': train_f1_macro,
+            'train/auc_micro': train_auc_micro,
+            'train/auc_macro': train_auc_macro,
+            'val/loss': val_loss,
+            'val/acc': val_acc,
+            'val/f1_micro': val_f1_micro,
+            'val/f1_macro': val_f1_macro,
+            'val/auc_micro': val_auc_micro,
+            'val/auc_macro': val_auc_macro,
+            'lr': optimizer.param_groups[0]['lr']
+        })
+        
         if val_auc_macro > best_val_auc:
             best_val_auc = val_auc_macro
             torch.save(model.state_dict(), ckpt)
@@ -161,19 +169,42 @@ def run_once(args, seed: int) -> dict:
         else:
             patience_counter += 1
             if patience_counter >= 5:
-                print("Early stopping")
                 break
 
     model.load_state_dict(torch.load(ckpt))
     test_loss, test_acc, test_f1_micro, test_f1_macro, test_auc_micro, test_auc_macro, test_probs, test_labels = eval_epoch(
         model, test_loader, criterion, device, args.use_semantic)
-    print(f"Test: Loss {test_loss:.4f} Acc {test_acc:.3f} F1-micro {test_f1_micro:.3f} "
-          f"F1-macro {test_f1_macro:.3f} AUC-micro {test_auc_micro:.3f} AUC-macro {test_auc_macro:.3f}")
-
+    
     _, _, _, _, _, _, val_probs, val_labels = eval_epoch(model, val_loader, criterion, device, args.use_semantic)
     thresholds = tune_thresholds(val_probs, val_labels)
-    print("=== Per-label Eval (tuned thresholds) ===")
-    evaluate_per_label(test_probs, test_labels, LABEL_COLUMNS, thresholds)
+    
+    wandb.log({
+        'test/loss': test_loss,
+        'test/acc': test_acc,
+        'test/f1_micro': test_f1_micro,
+        'test/f1_macro': test_f1_macro,
+        'test/auc_micro': test_auc_micro,
+        'test/auc_macro': test_auc_macro
+    })
+    
+    import matplotlib.pyplot as plt
+    
+    for i, label in enumerate(LABEL_COLUMNS):
+        preds = (test_probs[:, i] >= thresholds[i]).astype(int)
+        cm = sklearn.metrics.confusion_matrix(test_labels[:, i], preds)
+        fig, ax = plt.subplots()
+        ax.imshow(cm, interpolation='nearest', cmap=plt.cm.Blues)
+        ax.set_title(f'Confusion Matrix - {label}')
+        wandb.log({f'test/confusion_matrix_{label}': wandb.Image(fig)})
+        plt.close(fig)
+    
+    fig_roc = plot_roc_curve(test_labels, test_probs, LABEL_COLUMNS)
+    wandb.log({'test/roc_curve': wandb.Image(fig_roc)})
+    plt.close(fig_roc)
+    
+    fig_pr = plot_precision_recall_curve(test_labels, test_probs, LABEL_COLUMNS)
+    wandb.log({'test/pr_curve': wandb.Image(fig_pr)})
+    plt.close(fig_pr)
 
     return {"loss": test_loss, "acc": test_acc, "f1_micro": test_f1_micro, "f1_macro": test_f1_macro,
             "auc_micro": test_auc_micro, "auc_macro": test_auc_macro}
@@ -193,17 +224,24 @@ def main():
     parser.add_argument('--focal_gamma', type=float, default=2.0)
     parser.add_argument('--asl_gamma_neg', type=float, default=4.0)
     parser.add_argument('--asl_gamma_pos', type=float, default=1.0)
-    # Semantic fusion args
     parser.add_argument('--use_semantic', action='store_true')
     parser.add_argument('--embed_dim', type=int, default=128)
     parser.add_argument('--max_length', type=int, default=512)
+    parser.add_argument('--wandb_project', type=str, default='smellycode-dcnv2')
+    parser.add_argument('--wandb_entity', type=str, default=None)
     args = parser.parse_args()
 
     all_results = []
     for seed in args.seed:
-        result = run_once(args, seed)
-        all_results.append(result)
-        print(f"\n[Seed {seed}] Test: " + " ".join(f"{k}={v:.3f}" for k, v in result.items()))
+        with wandb.init(
+            project=args.wandb_project,
+            entity=args.wandb_entity,
+            config=vars(args),
+            name=f"seed_{seed}",
+            reinit=True
+        ) as run:
+            result = run_once(args, seed, run)
+            all_results.append(result)
 
     if len(args.seed) > 1:
         print("\n=== Multi-seed Summary ===")

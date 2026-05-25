@@ -42,12 +42,24 @@ uv sync
 smellycode/
 ├── src/
 │   ├── __init__.py
-│   ├── config.py          # Training and model configurations
-│   ├── data_utils.py      # Dataset and DataLoader utilities
+│   ├── data.py            # Dataset and DataLoader utilities
+│   ├── data_utils.py      # Additional data utilities
+│   ├── analysis/          # Evaluation and analysis tools
+│   │   ├── evaluation.py
+│   │   ├── feature_stats.py
+│   │   ├── label_stats.py
+│   │   └── model_summary.py
 │   ├── layers/
 │   │   └── layers.py      # Custom neural network layers (CrossLayer, Bottleneck)
+│   ├── losses/
+│   │   └── focal_loss.py  # Focal loss implementation
 │   └── networks/
-│       └── dcn.py         # DCNv2 model architecture
+│       ├── dcn.py         # DCNv2 model architecture
+│       └── fusion.py      # Fusion network architecture
+├── config.py              # Training and model configurations
+├── train.py               # Main training script
+├── modal_train.py         # Modal cloud training script
+├── analyze.py             # Analysis script
 ├── pyproject.toml         # Project metadata and dependencies
 ├── uv.lock                # Locked dependencies
 └── README.md              # This file
@@ -57,7 +69,7 @@ smellycode/
 
 ### Configuration
 
-Edit `src/config.py` to customize:
+Edit `config.py` to customize:
 
 ```python
 # Training config
@@ -92,6 +104,28 @@ model = DCNv2(
     embed_dim=128,
     num_classes=4  # Number of code smell types
 )
+```
+
+### Training
+
+Run training locally:
+
+```bash
+python train.py
+```
+
+Or on Modal cloud:
+
+```bash
+modal run modal_train.py
+```
+
+### Analysis
+
+Analyze model performance and dataset statistics:
+
+```bash
+python analyze.py
 ```
 
 ### Cloud Deployment

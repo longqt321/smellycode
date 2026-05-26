@@ -5,7 +5,7 @@ from config import ACTIVATION
 
 class DCNv2(nn.Module):
     def __init__(self, input_dim, projection_dim=128, cross_layers=4, num_deep_layers=2,
-                 embed_dim=128, num_classes=4, cross_type='standard', deep_type='bottleneck'):
+                 embed_dim=128, num_classes=None, cross_type='standard', deep_type='bottleneck'):
         super().__init__()
         self.proj = nn.Sequential(
             nn.Linear(input_dim, projection_dim),
@@ -21,7 +21,9 @@ class DCNv2(nn.Module):
             nn.LayerNorm(embed_dim),
         )
         self.gate_layer = nn.Linear(embed_dim,embed_dim)
-        self.classifier = nn.Linear(embed_dim, num_classes)
+        self.num_classes = num_classes
+        if self.num_classes:
+            self.classifier = nn.Linear(embed_dim, num_classes)
     def forward(self, x):
         x0 = self.proj(x)
         xc = x0.clone()
@@ -34,4 +36,7 @@ class DCNv2(nn.Module):
         h = xd + (gate*xc)
         
         embed = self.embedding(h)
-        return self.classifier(embed), embed
+        if self.num_classes:
+            return self.classifier(embed), embed
+        else:
+            return None,embed

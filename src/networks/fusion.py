@@ -45,18 +45,14 @@ class GatedFusionModel(nn.Module):
         super().__init__()
         self.embed_dim = embed_dim
         self.numeric = DCNv2(input_dim=input_dim, embed_dim=embed_dim,
-                             num_classes=num_classes, cross_type=cross_type, deep_type=deep_type)
-        self.bert = AutoModel.from_pretrained(self.BERT_MODEL)
-        for p in self.bert.parameters():
-            p.requires_grad = False
-
+                            cross_type=cross_type, deep_type=deep_type)
         self.text_proj = nn.Sequential(
             nn.Linear(self.BERT_DIM, embed_dim),
             nn.LayerNorm(embed_dim),
             nn.ReLU(),
         )
-        self.gate = nn.Sequential(
-            nn.Linear(embed_dim * 2, embed_dim*2),
+        self.gate_layer= nn.Sequential(
+            nn.Linear(embed_dim * 2, embed_dim),
             nn.Sigmoid(),
         )
         self.classifier = nn.Linear(embed_dim, num_classes)
@@ -69,10 +65,11 @@ class GatedFusionModel(nn.Module):
         """
         _, h_num = self.numeric(features)
         h_txt = self.text_proj(bert_embed.to(features.device))
-        gates = self.gate(torch.cat([h_num, h_txt], dim=1))
-        gate_num = gates[:, :self.embed_dim]
-        gate_txt = gates[:, self.embed_dim:]
-        return self.classifier(gate_num * h_num + gate_txt * h_txt)
+        
+        gate = self.gate_layer(torch.cat([h_num, h_txt], dim=1))
+        
+        fused_features = gate * h_num + (1.0 - gate) * h_txt
+        return self.classifier(fused_features)
 
 
 def get_tokenizer():

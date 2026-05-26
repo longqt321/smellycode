@@ -1,6 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.metrics import roc_curve, precision_recall_curve
+from sklearn.metrics import roc_curve, precision_recall_curve, average_precision_score
 
 
 def plot_roc_curve(y_true: np.ndarray, y_scores: np.ndarray, labels: list):
@@ -27,7 +27,7 @@ def plot_precision_recall_curve(y_true: np.ndarray, y_scores: np.ndarray, labels
     
     for i, label in enumerate(labels):
         precision, recall, _ = precision_recall_curve(y_true[:, i], y_scores[:, i])
-        avg_precision = np.trapezoid(precision[:-1], recall[:-1])
+        avg_precision = average_precision_score(y_true[:, i], y_scores[:, i])
         ax.plot(recall, precision, label=f'{label} (AP={avg_precision:.3f})')
     
     ax.set_xlabel('Recall')

@@ -12,27 +12,38 @@ class CrossLayer(nn.Module):
     
 
 class Bottleneck(nn.Module):
-    def __init__(self,dim,ratio=4):
+    def __init__(self,dim,ratios=[2,4]):
         super().__init__()
-        assert dim % ratio == 0, "Dim must be divisible by ratio"
-        bottleneck_dim = dim // ratio
+
+        for r in ratios:
+            assert dim % r == 0, "Dim must be divisible by ratio"
+
+        bottle_dims = [dim // x for x in ratios]
         
         self.btn = nn.Sequential(
             nn.LayerNorm(dim),
-            nn.Linear(dim,bottleneck_dim),
+            nn.Linear(dim,bottle_dims[0]),
             ACTIVATION(),
             
-            nn.Linear(bottleneck_dim,bottleneck_dim),
-            nn.LayerNorm(bottleneck_dim),
+            nn.Linear(bottle_dims[0],bottle_dims[0]),
+            nn.LayerNorm(bottle_dims[0]),
             ACTIVATION(),
             
-            nn.Linear(bottleneck_dim,dim),
+            nn.Linear(bottle_dims[0],bottle_dims[1]),
+            nn.LayerNorm(bottle_dims[1]),
+            ACTIVATION(),
+            
+            nn.Linear(bottle_dims[1],bottle_dims[1]),
+            nn.LayerNorm(bottle_dims[1]),
+            ACTIVATION(),
+            
+            nn.Linear(bottle_dims[1],dim),
         )
     def forward(self,x):
         return self.btn(x) + x
 
 class GatedCrossLayer(nn.Module):
-    def __init__(self, dim, rank=32):
+    def __init__(self, dim, rank=16):
         super().__init__()
         self.U = nn.Linear(dim, rank, bias=False)
         self.V = nn.Linear(rank, dim, bias=True)

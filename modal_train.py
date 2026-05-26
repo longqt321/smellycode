@@ -50,15 +50,15 @@ def train_modal(cross_type="standard", deep_type="bottleneck", tiny=False,
 
 @app.local_entrypoint()
 def train(
-    cross_type: str = "standard",   # comma-separated: "standard,gated"
+    cross_type: str = "gated",   # comma-separated: "standard,gated"
     deep_type: str = "bottleneck",  # comma-separated: "bottleneck,moe"
     tiny: bool = False,
     epochs: int = 50,
     batch_size: int = 2048,
-    lr: float = 1e-3,
+    lr: float = 1e-4,
     num_workers: int = 4,
     seeds: str = "1206",            # comma-separated: "1206,42,0"
-    loss: str = "bce",              # "bce" | "focal" | "asl"
+    loss: str = "focal",              # "bce" | "focal" | "asl"
     focal_gamma: float = 2.0,
     asl_gamma_neg: float = 4.0,
     asl_gamma_pos: float = 1.0,

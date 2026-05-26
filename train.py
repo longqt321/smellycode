@@ -6,7 +6,7 @@ import numpy as np
 import wandb
 import sklearn.metrics
 from torch.amp import GradScaler
-from sklearn.metrics import accuracy_score, f1_score, roc_auc_score
+from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, recall_score
 from src.data import get_loaders, get_fusion_loaders
 from src.networks.dcn import DCNv2
 from src.networks.fusion import GatedFusionModel, get_tokenizer, precompute_bert_embeddings
@@ -18,8 +18,14 @@ from config import LABEL_COLUMNS, SEED
 
 
 def compute_metrics(probs: np.ndarray, labels: np.ndarray):
+    """
+    Tính metrics cho multi‑label classification với imbalance nặng.
+    - balanced_acc: macro recall (công bằng giữa các lớp).
+    - Giữ nguyên cấu trúc output để không phá vỡ pipeline.
+    """
     preds = (probs >= 0.5).astype(int)
-    acc = accuracy_score(labels, preds)
+    # Dùng macro recall làm balanced accuracy cho đa nhãn
+    acc = recall_score(labels, preds, average='macro', zero_division=0)
     f1_micro = f1_score(labels, preds, average='micro', zero_division=0)
     f1_macro = f1_score(labels, preds, average='macro', zero_division=0)
     try:
@@ -105,10 +111,10 @@ def run_once(args, seed: int, run) -> dict:
         
         sample_features, sample_embeds, _ = next(iter(train_loader))
         input_dim = sample_features.shape[1]
-        bert_dim = sample_embeds.shape[1]
+        # bert_dim = sample_embeds.shape[1]
         
         model = GatedFusionModel(input_dim=input_dim, embed_dim=args.embed_dim,
-                                 cross_type=args.cross_type, deep_type=args.deep_type).to(device)
+                                 cross_type=args.cross_type, deep_type=args.deep_type,num_classes=4).to(device)
     else:
         train_loader, val_loader, test_loader, pos_weight = get_loaders(
             batch_size=args.batch_size, num_workers=args.num_workers, tiny=args.tiny)
@@ -132,10 +138,26 @@ def run_once(args, seed: int, run) -> dict:
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
 
     optimizer = torch.optim.AdamW(
-        filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr
+        filter(lambda p: p.requires_grad, model.parameters()), lr=args.lr,weight_decay=1e-2
     )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
+    scheduler1 = torch.optim.lr_scheduler.LinearLR(
+        optimizer,
+        start_factor=0.1,
+        end_factor=1,
+        total_iters=20,
+    )
+    
+    scheduler2 = torch.optim.lr_scheduler.CosineAnnealingLR(
+        optimizer,
+        T_max=80,
+        eta_min=args.lr * 0.1
+    )
+    scheduler = torch.optim.lr_scheduler.SequentialLR(
+        optimizer,
+        schedulers=[scheduler1, scheduler2],
+        milestones=[20],
+    )
     scaler = GradScaler('cuda', enabled=args.use_semantic and device.type == 'cuda')
 
     best_val_auc, patience_counter = 0, 0
@@ -147,7 +169,7 @@ def run_once(args, seed: int, run) -> dict:
             model, train_loader, optimizer, criterion, device, args.use_semantic, scaler)
         val_loss, val_acc, val_f1_micro, val_f1_macro, val_auc_micro, val_auc_macro, _, _ = eval_epoch(
             model, val_loader, criterion, device, args.use_semantic)
-        scheduler.step(val_loss)
+        scheduler.step()
         
         wandb.log({
             'epoch': epoch,
@@ -165,6 +187,13 @@ def run_once(args, seed: int, run) -> dict:
             'val/auc_macro': val_auc_macro,
             'lr': optimizer.param_groups[0]['lr']
         })
+        
+        print(
+            f"Epoch {epoch:02d}/{args.epochs} | LR: {optimizer.param_groups[0]['lr']:.6f}\n"
+            f"  [TRAIN] Loss: {train_loss:.4f} | Acc: {train_acc:.4f} | F1-Micro: {train_f1_micro:.4f} | F1-Macro: {train_f1_macro:.4f} | AUC-Micro: {train_auc_micro:.4f} | AUC-Macro: {train_auc_macro:.4f}\n"
+            f"  [VAL]   Loss: {val_loss:.4f} | Acc: {val_acc:.4f} | F1-Micro: {val_f1_micro:.4f} | F1-Macro: {val_f1_macro:.4f} | AUC-Micro: {val_auc_micro:.4f} | AUC-Macro: {val_auc_macro:.4f}\n"
+            f"{'-'*115}"
+        )
         
         if val_auc_macro > best_val_auc:
             best_val_auc = val_auc_macro
@@ -190,6 +219,11 @@ def run_once(args, seed: int, run) -> dict:
         'test/auc_micro': test_auc_micro,
         'test/auc_macro': test_auc_macro
     })
+    
+    print(
+            f"  [TEST] Loss: {test_loss:.4f} | Acc: {test_acc:.4f} | F1-Micro: {test_f1_micro:.4f} | F1-Macro: {test_f1_macro:.4f} | AUC-Micro: {test_auc_micro:.4f} | AUC-Macro: {test_auc_macro:.4f}\n"
+            f"{'-'*115}"
+        )
     
     import matplotlib.pyplot as plt
     
@@ -237,11 +271,14 @@ def main():
 
     all_results = []
     for seed in args.seed:
+        run_name = f"semantic={args.use_semantic}_cross={args.cross_type}_deep={args.deep_type}_loss={args.loss}_seed={seed}"
+
+        
         with wandb.init(
             project=args.wandb_project,
             entity=args.wandb_entity,
             config=vars(args),
-            name=f"seed_{seed}",
+            name=run_name,
             reinit=True
         ) as run:
             result = run_once(args, seed, run)

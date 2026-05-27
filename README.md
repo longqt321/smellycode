@@ -49,10 +49,12 @@ smellycode/
 │   │   ├── evaluation.py
 │   │   ├── feature_stats.py
 │   │   ├── label_stats.py
-│   │   └── model_summary.py
+│   │   ├── model_summary.py
+│   │   └── visualization.py
 │   ├── layers/
 │   │   └── layers.py      # Custom neural network layers (CrossLayer, Bottleneck)
 │   ├── losses/
+│   │   ├── __init__.py
 │   │   └── focal_loss.py  # Focal loss implementation
 │   └── networks/
 │       ├── dcn.py         # DCNv2 model architecture

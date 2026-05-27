@@ -3,7 +3,8 @@ import modal
 from pathlib import Path
 
 image = modal.Image.debian_slim(python_version="3.13").uv_pip_install(
-    "torch", "polars", "scikit-learn", "tqdm", "numpy", "transformers", "modal", "iterative-stratification","wandb","matplotlib","onnx","onnxruntime","seaborn"
+    "torch", "polars", "scikit-learn", "tqdm", "numpy", "transformers", "modal", "iterative-stratification","wandb","matplotlib",
+    "onnx","onnxruntime","seaborn","onnxscript"
 ).env({"PYTHONPATH": "/app"}).add_local_dir(Path(__file__).parent, "/app", ignore=[".git", ".env", ".venv", ".vscode"])
 
 volume = modal.Volume.from_name("smellycode-data", create_if_missing=True)

@@ -312,7 +312,6 @@ def run_once(args, seed: int, run) -> dict:
     
     # Gate visualization for fusion models
     if args.gate_analysis and args.use_semantic and args.fusion_type == 'gated':
-        import os
         gate_report_dir = os.path.join('artifacts', f'gate_analysis_seed{seed}')
         os.makedirs(gate_report_dir, exist_ok=True)
         
@@ -342,7 +341,6 @@ def run_once(args, seed: int, run) -> dict:
 
     # ONNX export
     if args.export_onnx:
-        import os
         onnx_dir = os.path.join('artifacts', f'onnx_export_seed{seed}')
         os.makedirs(onnx_dir, exist_ok=True)
         

@@ -5,6 +5,21 @@ from scipy.optimize import minimize
 from typing import List, Optional, Tuple
 
 
+def tune_thresholds(probs: np.ndarray, labels: np.ndarray, candidates=None) -> list:
+    """Find best threshold per label by maximizing F1 on validation set."""
+    if candidates is None:
+        candidates = np.arange(0.05, 0.95, 0.05)
+    thresholds = []
+    for i in range(labels.shape[1]):
+        best_t, best_f1 = 0.5, 0.0
+        for t in candidates:
+            f1 = f1_score(labels[:, i], (probs[:, i] >= t).astype(int), zero_division=0)
+            if f1 > best_f1:
+                best_f1, best_t = f1, t
+        thresholds.append(float(best_t))
+    return thresholds
+
+
 def tune_thresholds_bayesian(
     probs: np.ndarray,
     labels: np.ndarray,

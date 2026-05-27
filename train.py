@@ -11,7 +11,7 @@ from src.data import get_loaders, get_fusion_loaders
 from src.networks.dcn import DCNv2
 from src.networks.fusion import GatedFusionModel, LateFusionMLPModel, get_tokenizer, precompute_bert_embeddings
 from src.analysis.model_summary import print_model_summary
-from src.analysis.evaluation import tune_thresholds, tune_thresholds_bayesian, tune_thresholds_roc_based, compare_threshold_methods
+from src.analysis.threshold_optimization import tune_thresholds, tune_thresholds_bayesian, tune_thresholds_roc_based, compare_threshold_methods
 from src.analysis.visualization import plot_roc_curve, plot_precision_recall_curve
 from src.analysis.gate_visualization import create_gate_report, interpret_gate_behavior
 from src.losses.focal_loss import MultilabelFocalLoss, AsymmetricLoss

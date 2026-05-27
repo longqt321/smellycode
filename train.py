@@ -11,9 +11,11 @@ from src.data import get_loaders, get_fusion_loaders
 from src.networks.dcn import DCNv2
 from src.networks.fusion import GatedFusionModel, LateFusionMLPModel, get_tokenizer, precompute_bert_embeddings
 from src.analysis.model_summary import print_model_summary
-from src.analysis.evaluation import tune_thresholds
+from src.analysis.evaluation import tune_thresholds, tune_thresholds_bayesian, tune_thresholds_roc_based, compare_threshold_methods
 from src.analysis.visualization import plot_roc_curve, plot_precision_recall_curve
+from src.analysis.gate_visualization import create_gate_report, interpret_gate_behavior
 from src.losses.focal_loss import MultilabelFocalLoss, AsymmetricLoss
+from src.losses.class_balanced_loss import ClassBalancedFocalLoss, ClassBalancedLoss, get_class_balanced_weights_from_dataloader
 from config import LABEL_COLUMNS, SEED
 
 
@@ -166,6 +168,10 @@ def run_once(args, seed: int, run) -> dict:
         criterion = MultilabelFocalLoss(gamma=args.focal_gamma, alpha=pos_weight.to(device))
     elif args.loss == 'asl':
         criterion = AsymmetricLoss(gamma_neg=args.asl_gamma_neg, gamma_pos=args.asl_gamma_pos, alpha=pos_weight.to(device))
+    elif args.loss == 'cb_focal':
+        criterion = ClassBalancedFocalLoss(beta=args.cb_beta, gamma=args.focal_gamma)
+    elif args.loss == 'cb':
+        criterion = ClassBalancedLoss(beta=args.cb_beta)
     else:
         criterion = nn.BCEWithLogitsLoss(pos_weight=pos_weight.to(device))
 
@@ -256,7 +262,17 @@ def run_once(args, seed: int, run) -> dict:
         model, test_loader, criterion, device, args.use_semantic)
     
     _, _, _, _, _, _, val_probs, val_labels, _ = eval_epoch(model, val_loader, criterion, device, args.use_semantic)
-    thresholds = tune_thresholds(val_probs, val_labels)
+    
+    # Advanced threshold optimization
+    if args.threshold_method == 'bayesian':
+        thresholds = tune_thresholds_bayesian(val_probs, val_labels, metric='f1_macro', n_iterations=30)
+    elif args.threshold_method == 'roc':
+        thresholds = tune_thresholds_roc_based(val_probs, val_labels, criterion='youden')
+    else:  # grid
+        thresholds = tune_thresholds(val_probs, val_labels)
+    
+    print(f"\\nThreshold optimization method: {args.threshold_method}")
+    print(f"Optimized thresholds: {[f'{t:.3f}' for t in thresholds]}")
     
     test_log_payload = {
         'test/loss': test_loss,
@@ -292,6 +308,36 @@ def run_once(args, seed: int, run) -> dict:
     fig_pr = plot_precision_recall_curve(test_labels, test_probs, LABEL_COLUMNS)
     wandb.log({'test/pr_curve': wandb.Image(fig_pr)})
     plt.close(fig_pr)
+    
+    # Gate visualization for fusion models
+    if args.gate_analysis and args.use_semantic and args.fusion_type == 'gated':
+        import os
+        gate_report_dir = os.path.join('artifacts', f'gate_analysis_seed{seed}')
+        os.makedirs(gate_report_dir, exist_ok=True)
+        
+        from src.cached_dataset import get_cached_loaders
+        _, gate_loader, _ = get_cached_loaders(
+            os.path.dirname(train_cache), 
+            batch_size=args.batch_size, 
+            num_workers=args.num_workers
+        )
+        
+        gate_stats = create_gate_report(model, gate_loader, device, num_samples=500, save_dir=gate_report_dir)
+        interpretation = interpret_gate_behavior(gate_stats)
+        print(f"\n{interpretation}")
+        
+        # Log to wandb
+        wandb.log({
+            'gate/mean': gate_stats['mean'],
+            'gate/std': gate_stats['std'],
+            'gate/near_zero_pct': gate_stats['near_zero'] * 100,
+            'gate/near_one_pct': gate_stats['near_one'] * 100,
+            'gate/neutral_pct': gate_stats['neutral'] * 100,
+        })
+        
+        # Upload visualization images
+        wandb.save(os.path.join(gate_report_dir, 'gate_distribution.png'))
+        wandb.save(os.path.join(gate_report_dir, 'gate_by_class.png'))
 
     return {"loss": test_loss, "acc": test_acc, "f1_micro": test_f1_micro, "f1_macro": test_f1_macro,
             "auc_micro": test_auc_micro, "auc_macro": test_auc_macro}
@@ -307,10 +353,13 @@ def main():
     parser.add_argument('--lr', type=float, default=1e-3)
     parser.add_argument('--num_workers', type=int, default=4)
     parser.add_argument('--seed', type=int, nargs='+', default=[SEED])
-    parser.add_argument('--loss', choices=['bce', 'focal', 'asl'], default='bce')
+    parser.add_argument('--loss', choices=['bce', 'focal', 'asl', 'cb_focal', 'cb'], default='bce')
     parser.add_argument('--focal_gamma', type=float, default=2.0)
     parser.add_argument('--asl_gamma_neg', type=float, default=4.0)
     parser.add_argument('--asl_gamma_pos', type=float, default=1.0)
+    parser.add_argument('--cb_beta', type=float, default=0.9999)
+    parser.add_argument('--threshold_method', choices=['grid', 'bayesian', 'roc'], default='grid')
+    parser.add_argument('--gate_analysis', action='store_true', help='Generate gate visualization report')
     parser.add_argument('--use_semantic', action='store_true')
     parser.add_argument('--fusion_type', choices=['gated', 'late_mlp'], default='gated')
     parser.add_argument('--embed_dim', type=int, default=128)

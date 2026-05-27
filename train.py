@@ -9,7 +9,7 @@ from torch.amp import GradScaler
 from sklearn.metrics import accuracy_score, f1_score, roc_auc_score, recall_score
 from src.data import get_loaders, get_fusion_loaders
 from src.networks.dcn import DCNv2
-from src.networks.fusion import GatedFusionModel, get_tokenizer, precompute_bert_embeddings
+from src.networks.fusion import GatedFusionModel, LateFusionMLPModel, get_tokenizer, precompute_bert_embeddings
 from src.analysis.model_summary import print_model_summary
 from src.analysis.evaluation import tune_thresholds
 from src.analysis.visualization import plot_roc_curve, plot_precision_recall_curve
@@ -47,6 +47,11 @@ def _forward(model, batch, device, use_semantic):
         return logits, labels.to(device)
 
 
+def _get_gate_stats(model):
+    if hasattr(model, 'gate_stats') and callable(model.gate_stats):
+        return model.gate_stats()
+    return {}
+
 def make_cached_dataset(fusion_dataset, bert_embeds: torch.Tensor):
     """Wrap a CodeSmellFusionDataset, replacing code strings with pre-computed embeddings."""
     from torch.utils.data import TensorDataset
@@ -56,6 +61,7 @@ def make_cached_dataset(fusion_dataset, bert_embeds: torch.Tensor):
 def train_epoch(model, loader, optimizer, criterion, device, use_semantic, scaler):
     model.train()
     total_loss, all_preds, all_labels = 0, [], []
+    gate_stats_accumulator = []
     for batch in loader:
         optimizer.zero_grad()
         with torch.autocast(device_type=device.type, enabled=use_semantic and device.type == 'cuda'):
@@ -69,23 +75,38 @@ def train_epoch(model, loader, optimizer, criterion, device, use_semantic, scale
         total_loss += loss.item()
         all_preds.append(torch.sigmoid(logits).detach().cpu().numpy())
         all_labels.append(labels.cpu().numpy())
+        gate_stats = _get_gate_stats(model)
+        if gate_stats:
+            gate_stats_accumulator.append(gate_stats)
     all_preds = np.concatenate(all_preds)
     all_labels = np.concatenate(all_labels)
-    return total_loss / len(loader), *compute_metrics(all_preds, all_labels)
+    aggregated_gate_stats = {}
+    if gate_stats_accumulator:
+        for key in gate_stats_accumulator[0]:
+            aggregated_gate_stats[f'train/{key}'] = float(np.mean([s[key] for s in gate_stats_accumulator]))
+    return total_loss / len(loader), *compute_metrics(all_preds, all_labels), aggregated_gate_stats
 
 
 @torch.no_grad()
 def eval_epoch(model, loader, criterion, device, use_semantic):
     model.eval()
     total_loss, all_preds, all_labels = 0, [], []
+    gate_stats_accumulator = []
     for batch in loader:
         logits, labels = _forward(model, batch, device, use_semantic)
         total_loss += criterion(logits, labels).item()
         all_preds.append(torch.sigmoid(logits).cpu().numpy())
         all_labels.append(labels.cpu().numpy())
+        gate_stats = _get_gate_stats(model)
+        if gate_stats:
+            gate_stats_accumulator.append(gate_stats)
     all_preds = np.concatenate(all_preds)
     all_labels = np.concatenate(all_labels)
-    return total_loss / len(loader), *compute_metrics(all_preds, all_labels), all_preds, all_labels
+    aggregated_gate_stats = {}
+    if gate_stats_accumulator:
+        for key in gate_stats_accumulator[0]:
+            aggregated_gate_stats[f'eval/{key}'] = float(np.mean([s[key] for s in gate_stats_accumulator]))
+    return total_loss / len(loader), *compute_metrics(all_preds, all_labels), all_preds, all_labels, aggregated_gate_stats
 
 
 def run_once(args, seed: int, run) -> dict:
@@ -113,13 +134,24 @@ def run_once(args, seed: int, run) -> dict:
         input_dim = sample_features.shape[1]
         # bert_dim = sample_embeds.shape[1]
         
-        model = GatedFusionModel(input_dim=input_dim, embed_dim=args.embed_dim,
-                                 cross_type=args.cross_type, deep_type=args.deep_type,num_classes=4).to(device)
+        FusionClass = GatedFusionModel if args.fusion_type == 'gated' else LateFusionMLPModel
+        model = FusionClass(
+            input_dim=input_dim,
+            embed_dim=args.embed_dim,
+            cross_type=args.cross_type,
+            deep_type=args.deep_type,
+            num_classes=len(LABEL_COLUMNS),
+        ).to(device)
     else:
         train_loader, val_loader, test_loader, pos_weight = get_loaders(
             batch_size=args.batch_size, num_workers=args.num_workers, tiny=args.tiny)
         input_dim = next(iter(train_loader))[0].shape[1]
-        model = DCNv2(input_dim=input_dim, cross_type=args.cross_type, deep_type=args.deep_type).to(device)
+        model = DCNv2(
+            input_dim=input_dim,
+            cross_type=args.cross_type,
+            deep_type=args.deep_type,
+            num_classes=len(LABEL_COLUMNS),
+        ).to(device)
 
     if seed == args.seed[0]:
         print_model_summary(model)
@@ -165,13 +197,13 @@ def run_once(args, seed: int, run) -> dict:
     os.makedirs('artifacts', exist_ok=True)
 
     for epoch in range(1, args.epochs + 1):
-        train_loss, train_acc, train_f1_micro, train_f1_macro, train_auc_micro, train_auc_macro = train_epoch(
+        train_loss, train_acc, train_f1_micro, train_f1_macro, train_auc_micro, train_auc_macro, train_gate_stats = train_epoch(
             model, train_loader, optimizer, criterion, device, args.use_semantic, scaler)
-        val_loss, val_acc, val_f1_micro, val_f1_macro, val_auc_micro, val_auc_macro, _, _ = eval_epoch(
+        val_loss, val_acc, val_f1_micro, val_f1_macro, val_auc_micro, val_auc_macro, _, _, val_gate_stats = eval_epoch(
             model, val_loader, criterion, device, args.use_semantic)
         scheduler.step()
         
-        wandb.log({
+        log_payload = {
             'epoch': epoch,
             'train/loss': train_loss,
             'train/acc': train_acc,
@@ -186,12 +218,27 @@ def run_once(args, seed: int, run) -> dict:
             'val/auc_micro': val_auc_micro,
             'val/auc_macro': val_auc_macro,
             'lr': optimizer.param_groups[0]['lr']
-        })
+        }
+        log_payload.update(train_gate_stats)
+        log_payload.update(val_gate_stats)
+        wandb.log(log_payload)
+
+        gate_console = ""
+        if train_gate_stats:
+            gate_console = (
+                f"\n  [GATE] train_mean: {train_gate_stats.get('train/gate/mean', 0.0):.4f}"
+                f" | train_std: {train_gate_stats.get('train/gate/std', 0.0):.4f}"
+                f" | val_mean: {val_gate_stats.get('eval/gate/mean', 0.0):.4f}"
+                f" | val_std: {val_gate_stats.get('eval/gate/std', 0.0):.4f}"
+                f" | near0: {val_gate_stats.get('eval/gate/near_zero', 0.0):.4f}"
+                f" | near1: {val_gate_stats.get('eval/gate/near_one', 0.0):.4f}"
+            )
         
         print(
             f"Epoch {epoch:02d}/{args.epochs} | LR: {optimizer.param_groups[0]['lr']:.6f}\n"
             f"  [TRAIN] Loss: {train_loss:.4f} | Acc: {train_acc:.4f} | F1-Micro: {train_f1_micro:.4f} | F1-Macro: {train_f1_macro:.4f} | AUC-Micro: {train_auc_micro:.4f} | AUC-Macro: {train_auc_macro:.4f}\n"
             f"  [VAL]   Loss: {val_loss:.4f} | Acc: {val_acc:.4f} | F1-Micro: {val_f1_micro:.4f} | F1-Macro: {val_f1_macro:.4f} | AUC-Micro: {val_auc_micro:.4f} | AUC-Macro: {val_auc_macro:.4f}\n"
+            f"{gate_console}\n"
             f"{'-'*115}"
         )
         
@@ -205,20 +252,22 @@ def run_once(args, seed: int, run) -> dict:
                 break
 
     model.load_state_dict(torch.load(ckpt))
-    test_loss, test_acc, test_f1_micro, test_f1_macro, test_auc_micro, test_auc_macro, test_probs, test_labels = eval_epoch(
+    test_loss, test_acc, test_f1_micro, test_f1_macro, test_auc_micro, test_auc_macro, test_probs, test_labels, test_gate_stats = eval_epoch(
         model, test_loader, criterion, device, args.use_semantic)
     
-    _, _, _, _, _, _, val_probs, val_labels = eval_epoch(model, val_loader, criterion, device, args.use_semantic)
+    _, _, _, _, _, _, val_probs, val_labels, _ = eval_epoch(model, val_loader, criterion, device, args.use_semantic)
     thresholds = tune_thresholds(val_probs, val_labels)
     
-    wandb.log({
+    test_log_payload = {
         'test/loss': test_loss,
         'test/acc': test_acc,
         'test/f1_micro': test_f1_micro,
         'test/f1_macro': test_f1_macro,
         'test/auc_micro': test_auc_micro,
         'test/auc_macro': test_auc_macro
-    })
+    }
+    test_log_payload.update({k.replace('eval/', 'test/'): v for k, v in test_gate_stats.items()})
+    wandb.log(test_log_payload)
     
     print(
             f"  [TEST] Loss: {test_loss:.4f} | Acc: {test_acc:.4f} | F1-Micro: {test_f1_micro:.4f} | F1-Macro: {test_f1_macro:.4f} | AUC-Micro: {test_auc_micro:.4f} | AUC-Macro: {test_auc_macro:.4f}\n"
@@ -263,6 +312,7 @@ def main():
     parser.add_argument('--asl_gamma_neg', type=float, default=4.0)
     parser.add_argument('--asl_gamma_pos', type=float, default=1.0)
     parser.add_argument('--use_semantic', action='store_true')
+    parser.add_argument('--fusion_type', choices=['gated', 'late_mlp'], default='gated')
     parser.add_argument('--embed_dim', type=int, default=128)
     parser.add_argument('--max_length', type=int, default=512)
     parser.add_argument('--wandb_project', type=str, default='smellycode-dcnv2')
@@ -271,7 +321,7 @@ def main():
 
     all_results = []
     for seed in args.seed:
-        run_name = f"semantic={args.use_semantic}_cross={args.cross_type}_deep={args.deep_type}_loss={args.loss}_seed={seed}"
+        run_name = f"semantic={args.use_semantic}_fusion={args.fusion_type}_cross={args.cross_type}_deep={args.deep_type}_loss={args.loss}_seed={seed}"
 
         
         with wandb.init(

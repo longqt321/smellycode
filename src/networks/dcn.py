@@ -56,10 +56,10 @@ class DCNv2(nn.Module):
         
         # Embedding and gating
         self.embedding = nn.Sequential(
-            nn.Linear(embed_dim, embed_dim),
+            nn.Linear(projection_dim, embed_dim),
             nn.LayerNorm(embed_dim),
         )
-        self.gate_layer = nn.Linear(embed_dim, embed_dim)
+        self.gate_layer = nn.Linear(projection_dim, projection_dim)
         
         # Optional classifier head
         self.num_classes = num_classes

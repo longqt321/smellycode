@@ -63,7 +63,8 @@ class GatedFusionModel(nn.Module):
         - text_branch: GraphCodeBERT [CLS] (frozen) -> project -> embed_dim
         - gate: sigmoid(W * [h_num; h_txt]) -> (0,1)^embed_dim
         - fused: gate * h_num + (1 - gate) * h_txt
-        - classifier: Linear(embed_dim, num_classes)
+ clear
+ - classifier: Linear(embed_dim, num_classes)
     
     Attributes:
         BERT_MODEL: Name of the pretrained GraphCodeBERT model
@@ -91,6 +92,7 @@ class GatedFusionModel(nn.Module):
             cross_type=cross_type,
             deep_type=deep_type,
         )
+        self.last_gate = None
         
         # Text embedding projection
         self.text_proj = nn.Sequential(
@@ -126,8 +128,70 @@ class GatedFusionModel(nn.Module):
         h_txt = self.text_proj(bert_embed.to(features.device))
         
         gate = self.gate_layer(torch.cat([h_num, h_txt], dim=1))
+        self.last_gate = gate.detach()
         fused_features = gate * h_num + (1.0 - gate) * h_txt
         
+        return self.classifier(fused_features)
+
+    def gate_stats(self) -> dict:
+        """Return summary statistics for the most recent fusion gate."""
+        if self.last_gate is None:
+            return {}
+        gate = self.last_gate.float()
+        return {
+            'gate/mean': gate.mean().item(),
+            'gate/std': gate.std(unbiased=False).item(),
+            'gate/min': gate.min().item(),
+            'gate/max': gate.max().item(),
+            'gate/near_zero': (gate < 0.05).float().mean().item(),
+            'gate/near_one': (gate > 0.95).float().mean().item(),
+        }
+
+
+class LateFusionMLPModel(nn.Module):
+    """Late fusion baseline using concat([numeric, text]) followed by an MLP head."""
+
+    BERT_MODEL = GatedFusionModel.BERT_MODEL
+    BERT_DIM = GatedFusionModel.BERT_DIM
+
+    def __init__(
+        self,
+        input_dim: int,
+        embed_dim: int = 128,
+        num_classes: int = 4,
+        cross_type: Literal['standard', 'gated'] = 'standard',
+        deep_type: Literal['bottleneck', 'moe'] = 'bottleneck',
+        hidden_dim: Optional[int] = None,
+    ):
+        super().__init__()
+        hidden_dim = hidden_dim or embed_dim * 2
+
+        self.numeric = DCNv2(
+            input_dim=input_dim,
+            embed_dim=embed_dim,
+            cross_type=cross_type,
+            deep_type=deep_type,
+        )
+        self.text_proj = nn.Sequential(
+            nn.Linear(self.BERT_DIM, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.ReLU(),
+        )
+        self.fusion_mlp = nn.Sequential(
+            nn.Linear(embed_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(0.1),
+            nn.Linear(hidden_dim, embed_dim),
+            nn.LayerNorm(embed_dim),
+            nn.ReLU(),
+        )
+        self.classifier = nn.Linear(embed_dim, num_classes)
+
+    def forward(self, features: torch.Tensor, bert_embed: torch.Tensor) -> torch.Tensor:
+        _, h_num = self.numeric(features)
+        h_txt = self.text_proj(bert_embed.to(features.device))
+        fused_features = self.fusion_mlp(torch.cat([h_num, h_txt], dim=1))
         return self.classifier(fused_features)
 
 

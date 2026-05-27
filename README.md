@@ -1,6 +1,6 @@
 # smellycode
 
-A deep learning project for automated code smell detection using Deep & Cross Networks (DCNv2).
+A deep learning project for automated code smell detection using Deep & Cross Networks (DCNv2) and GraphCodeBERT fusion models.
 
 ## Description
 
@@ -11,10 +11,48 @@ This project implements a neural network architecture designed to detect common 
 - **Feature envy**: Methods that seem more interested in other classes than their own
 - **Data class**: Classes that only contain data fields with no behavior
 
-The model uses a Deep & Cross Network (DCNv2) architecture that combines:
+The model uses two architectures:
+
+### DCNv2 (Metrics-based)
 - Cross layers for explicit feature interaction learning
 - Deep layers with bottleneck structures for implicit feature learning
 - Multi-label classification for detecting multiple code smells simultaneously
+
+### GatedFusionModel (Metrics + Semantic)
+- Combines traditional code metrics with GraphCodeBERT embeddings
+- Gated fusion mechanism to dynamically weight numeric vs semantic features
+- Pre-computed BERT embeddings for faster training
+- Advanced visualization of gate behavior
+
+## Key Features
+
+### ✨ Advanced Threshold Optimization
+Three methods for optimizing decision thresholds:
+- **Grid Search**: Traditional exhaustive search over threshold candidates
+- **Bayesian Optimization**: Gradient-free optimization with local refinement (Nelder-Mead)
+- **ROC-based**: Youden's J statistic or closest-to-top-left criteria
+
+### ⚖️ Class Imbalance Handling
+Multiple strategies without resampling (preserves true distribution):
+- **Focal Loss**: Focuses on hard examples
+- **Asymmetric Loss (ASL)**: Separate focusing for positive/negative samples
+- **Class-Balanced Loss**: Effective number of samples framework
+- **CB-Focal Loss**: Combines CB weighting with focal loss
+
+### 🎯 Gate Visualization (Fusion Models Only)
+Comprehensive analysis of the gated fusion mechanism:
+- Distribution analysis of gate values
+- Per-dimension statistics
+- Decision breakdown (numeric vs text preference)
+- Gate behavior by class
+- Human-readable interpretation reports
+
+### 📦 ONNX Export
+Export trained models for production deployment:
+- DCNv2 model export (single input)
+- Fusion model export (dual input: features + BERT embeddings)
+- Automatic verification with PyTorch comparison
+- Benchmarking utilities for performance comparison
 
 ## Installation
 
@@ -50,15 +88,21 @@ smellycode/
 │   │   ├── feature_stats.py
 │   │   ├── label_stats.py
 │   │   ├── model_summary.py
-│   │   └── visualization.py
+│   │   ├── visualization.py
+│   │   ├── threshold_optimization.py  # Advanced threshold tuning (Bayesian, ROC)
+│   │   └── gate_visualization.py      # Gate mechanism analysis
 │   ├── layers/
 │   │   └── layers.py      # Custom neural network layers (CrossLayer, Bottleneck)
 │   ├── losses/
 │   │   ├── __init__.py
-│   │   └── focal_loss.py  # Focal loss implementation
-│   └── networks/
-│       ├── dcn.py         # DCNv2 model architecture
-│       └── fusion.py      # Fusion network architecture (DCNv2 + GraphCodeBERT)
+│   │   ├── focal_loss.py              # Focal Loss & Asymmetric Loss
+│   │   └── class_balanced_loss.py     # Class-Balanced Loss (Effective Number)
+│   ├── networks/
+│   │   ├── dcn.py         # DCNv2 model architecture
+│   │   └── fusion.py      # Fusion network architecture (GatedFusionModel)
+│   └── utils/
+│       ├── __init__.py
+│       └── onnx_export.py # ONNX export utilities
 ├── config.py              # Training and model configurations
 ├── train.py               # Main training script
 ├── precompute_embeddings.py  # Pre-compute GraphCodeBERT embeddings
@@ -156,14 +200,52 @@ modal run modal_train.py --use-semantic --embed-dim 128
 **Training options:**
 ```bash
 python train.py --help
+  # Model architecture
   --cross_type {standard,gated}   # Cross layer type
   --deep_type {bottleneck,moe}    # Deep layer type
   --use_semantic                  # Enable fusion with GraphCodeBERT
+  --fusion_type {gated,late_mlp}  # Fusion model type (default: gated)
   --embed_dim INT                 # Embedding dimension (default: 128)
-  --loss {bce,focal,asl}          # Loss function
+  
+  # Loss functions for imbalanced data
+  --loss {bce,focal,asl,cb_focal,cb}  # Loss function
+  --focal_gamma FLOAT             # Focal loss gamma (default: 2.0)
+  --asl_gamma_neg FLOAT           # ASL negative gamma (default: 4.0)
+  --asl_gamma_pos FLOAT           # ASL positive gamma (default: 1.0)
+  --cb_beta FLOAT                 # Class-balanced beta (default: 0.9999)
+  
+  # Threshold optimization
+  --threshold_method {grid,bayesian,roc}  # Method for threshold tuning
+                                          # grid: Traditional grid search
+                                          # bayesian: Nelder-Mead optimization
+                                          # roc: Youden's J statistic
+  
+  # Analysis & Export
+  --gate_analysis                 # Generate gate visualization report (fusion only)
+  --export_onnx                   # Export trained model to ONNX format
+  
+  # Training hyperparameters
   --epochs INT                    # Number of epochs
   --batch_size INT                # Batch size
   --lr FLOAT                      # Learning rate
+  --seed INT+                     # Random seed(s) for multi-run experiments
+```
+
+### Advanced Usage Examples
+
+#### Train with Class-Balanced Focal Loss and Bayesian Threshold Optimization
+```bash
+python train.py --use_semantic --loss cb_focal --threshold_method bayesian --gate_analysis
+```
+
+#### Train with Asymmetric Loss and Export to ONNX
+```bash
+python train.py --use_semantic --loss asl --export_onnx --epochs 100
+```
+
+#### Multi-seed Experiment with Gate Analysis
+```bash
+python train.py --use_semantic --loss cb_focal --gate_analysis --seed 1206 42 123
 ```
 
 ### Analysis
@@ -174,12 +256,64 @@ Analyze model performance and dataset statistics:
 python analyze.py
 ```
 
+**Gate Visualization Report** (Fusion models only):
+After training with `--gate_analysis`, you'll get:
+- `artifacts/gate_analysis_seed{N}/gate_distribution.png`: Gate value distributions
+- `artifacts/gate_analysis_seed{N}/gate_by_class.png`: Gate behavior per class
+- Console output with human-readable interpretation
+
+**ONNX Export**:
+After training with `--export_onnx`, you'll get:
+- `artifacts/onnx_export_seed{N}/fusion_model.onnx` or `dcn_model.onnx`
+- Automatic verification comparing PyTorch vs ONNX outputs
+- Performance metrics logged to W&B
+
 ### Cloud Deployment
 
 This project is configured for deployment on Modal cloud infrastructure. The dataset and artifacts are mounted at `/mnt/data`:
 
 - `DATASET_PATH`: Path to the training dataset (`dataset.csv`)
 - `ARTIFACTS_DIR`: Directory for saving model checkpoints and logs
+
+### Implementation Details
+
+#### Threshold Optimization Methods
+
+The project implements three threshold optimization strategies:
+
+1. **Grid Search** (`--threshold_method grid`): Traditional exhaustive search over threshold candidates (0.05 to 0.95)
+
+2. **Bayesian Optimization** (`--threshold_method bayesian`): 
+   - Uses Nelder-Mead simplex method for gradient-free optimization
+   - Starts from best grid-search thresholds as initial point
+   - Optimizes F1-macro, F1-micro, or balanced accuracy
+
+3. **ROC-based** (`--threshold_method roc`):
+   - Youden's J statistic: maximizes (sensitivity + specificity - 1)
+   - Closest-to-top-left: minimizes distance to perfect classifier
+
+#### Class Imbalance Handling
+
+All methods work by reweighting the loss function, NOT by resampling data:
+
+- **Focal Loss**: Down-weights easy examples, focuses on hard ones
+- **Asymmetric Loss**: Different focusing parameters for positive/negative samples
+- **Class-Balanced Loss**: Uses effective number of samples framework
+  - Formula: EN(n) = (1 - β^n) / (1 - β)
+  - Preserves true data distribution while adjusting loss weights
+
+#### Gate Mechanism (Fusion Models)
+
+The gated fusion mechanism learns to dynamically weight numeric vs semantic features:
+- Gate value close to 1: relies more on numeric metrics
+- Gate value close to 0: relies more on text embeddings
+- Gate value around 0.5: balanced blending
+
+Use `--gate_analysis` to generate comprehensive reports including:
+- Distribution histograms
+- Per-dimension statistics
+- Decision breakdown analysis
+- Interpretation in natural language
 
 ## License
 

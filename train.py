@@ -16,6 +16,7 @@ from src.analysis.visualization import plot_roc_curve, plot_precision_recall_cur
 from src.analysis.gate_visualization import create_gate_report, interpret_gate_behavior
 from src.losses.focal_loss import MultilabelFocalLoss, AsymmetricLoss
 from src.losses.class_balanced_loss import ClassBalancedFocalLoss, ClassBalancedLoss, get_class_balanced_weights_from_dataloader
+from src.utils.onnx_export import export_dcn_to_onnx, export_fusion_to_onnx
 from config import LABEL_COLUMNS, SEED
 
 
@@ -339,7 +340,62 @@ def run_once(args, seed: int, run) -> dict:
         wandb.save(os.path.join(gate_report_dir, 'gate_distribution.png'))
         wandb.save(os.path.join(gate_report_dir, 'gate_by_class.png'))
 
-    return {"loss": test_loss, "acc": test_acc, "f1_micro": test_f1_micro, "f1_macro": test_f1_macro,
+    # ONNX export
+    if args.export_onnx:
+        import os
+        onnx_dir = os.path.join('artifacts', f'onnx_export_seed{seed}')
+        os.makedirs(onnx_dir, exist_ok=True)
+        
+        if args.use_semantic:
+            onnx_path = os.path.join(onnx_dir, 'fusion_model.onnx')
+            sample_features, sample_embeds, _ = next(iter(train_loader))
+            input_dim = sample_features.shape[1]
+            bert_dim = sample_embeds.shape[1]
+            
+            export_info = export_fusion_to_onnx(
+                model=model,
+                input_dim=input_dim,
+                bert_dim=bert_dim,
+                output_path=onnx_path,
+                device=device
+            )
+            print(f"\n[FUSION MODEL ONNX EXPORT]")
+            print(f"  Model saved to: {onnx_path}")
+            print(f"  Input dim: {input_dim}, BERT dim: {bert_dim}")
+            print(f"  Output dim: {export_info['output_dim']}")
+            print(f"  Verification: {'PASSED' if export_info['verified'] else 'FAILED'}")
+            print(f"  Max PyTorch-ONNX diff: {export_info['max_pytorch_diff']:.2e}")
+            
+            wandb.log({
+                'onnx/exported': True,
+                'onnx/max_diff': export_info['max_pytorch_diff'],
+                'onnx/verified': export_info['verified']
+            })
+        else:
+            onnx_path = os.path.join(onnx_dir, 'dcn_model.onnx')
+            sample_features, _ = next(iter(train_loader))
+            input_dim = sample_features.shape[1]
+            
+            export_info = export_dcn_to_onnx(
+                model=model,
+                input_dim=input_dim,
+                output_path=onnx_path,
+                device=device
+            )
+            print(f"\n[DCN MODEL ONNX EXPORT]")
+            print(f"  Model saved to: {onnx_path}")
+            print(f"  Input dim: {input_dim}")
+            print(f"  Output dim: {export_info['output_dim']}")
+            print(f"  Verification: {'PASSED' if export_info['verified'] else 'FAILED'}")
+            print(f"  Max PyTorch-ONNX diff: {export_info['max_pytorch_diff']:.2e}")
+            
+            wandb.log({
+                'onnx/exported': True,
+                'onnx/max_diff': export_info['max_pytorch_diff'],
+                'onnx/verified': export_info['verified']
+            })
+
+    return {"loss": test_loss, "acc": test_acc, "f1_micro": test_f1_macro, "f1_macro": test_f1_macro,
             "auc_micro": test_auc_micro, "auc_macro": test_auc_macro}
 
 
@@ -360,6 +416,7 @@ def main():
     parser.add_argument('--cb_beta', type=float, default=0.9999)
     parser.add_argument('--threshold_method', choices=['grid', 'bayesian', 'roc'], default='grid')
     parser.add_argument('--gate_analysis', action='store_true', help='Generate gate visualization report')
+    parser.add_argument('--export_onnx', action='store_true', help='Export model to ONNX format after training')
     parser.add_argument('--use_semantic', action='store_true')
     parser.add_argument('--fusion_type', choices=['gated', 'late_mlp'], default='gated')
     parser.add_argument('--embed_dim', type=int, default=128)

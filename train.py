@@ -344,6 +344,17 @@ def run_once(args, seed: int, run) -> dict:
         onnx_dir = os.path.join('artifacts', f'onnx_export_seed{seed}')
         os.makedirs(onnx_dir, exist_ok=True)
         
+        # Also prepare to save to Modal volume if running on Modal
+        onnx_volume = None
+        volume_onnx_dir = f'/artifacts/onnx_export_seed{seed}'
+        try:
+            from modal import Volume
+            onnx_volume = Volume.from_name("smellycode-onnx", create_if_missing=True)
+            # Create directory in volume
+            onnx_volume.mkdir(volume_onnx_dir.lstrip('/'), parents=True, exist_ok=True)
+        except Exception:
+            pass  # Not running on Modal or volume not available
+        
         if args.use_semantic:
             onnx_path = os.path.join(onnx_dir, 'fusion_model.onnx')
             sample_features, sample_embeds, _ = next(iter(train_loader))
@@ -363,6 +374,15 @@ def run_once(args, seed: int, run) -> dict:
             print(f"  Output dim: {export_info['output_dim']}")
             print(f"  Verification: {'PASSED' if export_info['verified'] else 'FAILED'}")
             print(f"  Max PyTorch-ONNX diff: {export_info['max_pytorch_diff']:.2e}")
+            
+            # Copy to Modal volume if available
+            if onnx_volume is not None:
+                try:
+                    with open(onnx_path, 'rb') as f:
+                        onnx_volume.write_file(f'{volume_onnx_dir}/fusion_model.onnx', f.read())
+                    print(f"  Saved to Modal volume: {volume_onnx_dir}/fusion_model.onnx")
+                except Exception as e:
+                    print(f"  Warning: Could not save to Modal volume: {e}")
             
             wandb.log({
                 'onnx/exported': True,
@@ -386,6 +406,15 @@ def run_once(args, seed: int, run) -> dict:
             print(f"  Output dim: {export_info['output_dim']}")
             print(f"  Verification: {'PASSED' if export_info['verified'] else 'FAILED'}")
             print(f"  Max PyTorch-ONNX diff: {export_info['max_pytorch_diff']:.2e}")
+            
+            # Copy to Modal volume if available
+            if onnx_volume is not None:
+                try:
+                    with open(onnx_path, 'rb') as f:
+                        onnx_volume.write_file(f'{volume_onnx_dir}/dcn_model.onnx', f.read())
+                    print(f"  Saved to Modal volume: {volume_onnx_dir}/dcn_model.onnx")
+                except Exception as e:
+                    print(f"  Warning: Could not save to Modal volume: {e}")
             
             wandb.log({
                 'onnx/exported': True,

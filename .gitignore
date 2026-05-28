@@ -1,1 +1,4 @@
-Nothing should be ignored based on the provided file changes. The modified files (`modal_train.py` and `train.py`) are Python source code files that should be tracked in version control. No build artifacts, dependencies, temporary files, or other ignorable content was detected in the changes.
+```
+__pycache__/
+*.pyc
+```

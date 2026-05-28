@@ -355,13 +355,47 @@ def run_once(args, seed: int, run) -> dict:
         except Exception:
             pass  # Not running on Modal or volume not available
         
+        # Export pure DCNv2 model (always)
+        dcnx_path = os.path.join(onnx_dir, 'dcnv2_pure.onnx')
         if args.use_semantic:
-            onnx_path = os.path.join(onnx_dir, 'fusion_model.onnx')
+            # Extract the numeric branch (DCNv2) from the fusion model
+            dcn_model = model.numeric
             sample_features, sample_embeds, _ = next(iter(train_loader))
             input_dim = sample_features.shape[1]
+        else:
+            dcn_model = model
+            sample_features, _ = next(iter(train_loader))
+            input_dim = sample_features.shape[1]
+        
+        dcn_export_info = export_dcn_to_onnx(
+            model=dcn_model,
+            input_dim=input_dim,
+            output_path=dcnx_path,
+            device=device
+        )
+        print(f"\n[DCNv2 PURE MODEL ONNX EXPORT]")
+        print(f"  Model saved to: {dcnx_path}")
+        print(f"  Input dim: {input_dim}")
+        print(f"  Output dim: {dcn_export_info['output_dim']}")
+        print(f"  Verification: {'PASSED' if dcn_export_info['verified'] else 'FAILED'}")
+        print(f"  Max PyTorch-ONNX diff: {dcn_export_info['max_pytorch_diff']:.2e}")
+        
+        # Copy DCNv2 to Modal volume if available
+        if onnx_volume is not None:
+            try:
+                with open(dcnx_path, 'rb') as f:
+                    onnx_volume.write_file(f'{volume_onnx_dir}/dcnv2_pure.onnx', f.read())
+                print(f"  Saved to Modal volume: {volume_onnx_dir}/dcnv2_pure.onnx")
+            except Exception as e:
+                print(f"  Warning: Could not save DCNv2 to Modal volume: {e}")
+        
+        # Export fusion model (only if using semantic features)
+        fusion_export_info = None
+        if args.use_semantic:
+            onnx_path = os.path.join(onnx_dir, 'fusion_model.onnx')
             bert_dim = sample_embeds.shape[1]
             
-            export_info = export_fusion_to_onnx(
+            fusion_export_info = export_fusion_to_onnx(
                 model=model,
                 input_dim=input_dim,
                 bert_dim=bert_dim,
@@ -371,56 +405,31 @@ def run_once(args, seed: int, run) -> dict:
             print(f"\n[FUSION MODEL ONNX EXPORT]")
             print(f"  Model saved to: {onnx_path}")
             print(f"  Input dim: {input_dim}, BERT dim: {bert_dim}")
-            print(f"  Output dim: {export_info['output_dim']}")
-            print(f"  Verification: {'PASSED' if export_info['verified'] else 'FAILED'}")
-            print(f"  Max PyTorch-ONNX diff: {export_info['max_pytorch_diff']:.2e}")
+            print(f"  Output dim: {fusion_export_info['output_dim']}")
+            print(f"  Verification: {'PASSED' if fusion_export_info['verified'] else 'FAILED'}")
+            print(f"  Max PyTorch-ONNX diff: {fusion_export_info['max_pytorch_diff']:.2e}")
             
-            # Copy to Modal volume if available
+            # Copy fusion model to Modal volume if available
             if onnx_volume is not None:
                 try:
                     with open(onnx_path, 'rb') as f:
                         onnx_volume.write_file(f'{volume_onnx_dir}/fusion_model.onnx', f.read())
                     print(f"  Saved to Modal volume: {volume_onnx_dir}/fusion_model.onnx")
                 except Exception as e:
-                    print(f"  Warning: Could not save to Modal volume: {e}")
-            
-            wandb.log({
-                'onnx/exported': True,
-                'onnx/max_diff': export_info['max_pytorch_diff'],
-                'onnx/verified': export_info['verified']
+                    print(f"  Warning: Could not save fusion model to Modal volume: {e}")
+        
+        # Log to wandb
+        wandb_log_data = {
+            'onnx/exported': True,
+            'onnx/dcnv2_max_diff': dcn_export_info['max_pytorch_diff'],
+            'onnx/dcnv2_verified': dcn_export_info['verified']
+        }
+        if fusion_export_info is not None:
+            wandb_log_data.update({
+                'onnx/fusion_max_diff': fusion_export_info['max_pytorch_diff'],
+                'onnx/fusion_verified': fusion_export_info['verified']
             })
-        else:
-            onnx_path = os.path.join(onnx_dir, 'dcn_model.onnx')
-            sample_features, _ = next(iter(train_loader))
-            input_dim = sample_features.shape[1]
-            
-            export_info = export_dcn_to_onnx(
-                model=model,
-                input_dim=input_dim,
-                output_path=onnx_path,
-                device=device
-            )
-            print(f"\n[DCN MODEL ONNX EXPORT]")
-            print(f"  Model saved to: {onnx_path}")
-            print(f"  Input dim: {input_dim}")
-            print(f"  Output dim: {export_info['output_dim']}")
-            print(f"  Verification: {'PASSED' if export_info['verified'] else 'FAILED'}")
-            print(f"  Max PyTorch-ONNX diff: {export_info['max_pytorch_diff']:.2e}")
-            
-            # Copy to Modal volume if available
-            if onnx_volume is not None:
-                try:
-                    with open(onnx_path, 'rb') as f:
-                        onnx_volume.write_file(f'{volume_onnx_dir}/dcn_model.onnx', f.read())
-                    print(f"  Saved to Modal volume: {volume_onnx_dir}/dcn_model.onnx")
-                except Exception as e:
-                    print(f"  Warning: Could not save to Modal volume: {e}")
-            
-            wandb.log({
-                'onnx/exported': True,
-                'onnx/max_diff': export_info['max_pytorch_diff'],
-                'onnx/verified': export_info['verified']
-            })
+        wandb.log(wandb_log_data)
 
     return {"loss": test_loss, "acc": test_acc, "f1_micro": test_f1_macro, "f1_macro": test_f1_macro,
             "auc_micro": test_auc_micro, "auc_macro": test_auc_macro}

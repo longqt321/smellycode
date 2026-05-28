@@ -350,9 +350,10 @@ def run_once(args, seed: int, run) -> dict:
         try:
             from modal import Volume
             onnx_volume = Volume.from_name("smellycode-onnx", create_if_missing=True)
-            # Create directory in volume
-            onnx_volume.mkdir(volume_onnx_dir.lstrip('/'), parents=True, exist_ok=True)
-        except Exception:
+            # Create directory in volume - use absolute path with leading slash
+            onnx_volume.mkdir(volume_onnx_dir, parents=True, exist_ok=True)
+        except Exception as e:
+            print(f"Note: Modal volume not available ({e})")
             pass  # Not running on Modal or volume not available
         
         # Export pure DCNv2 model (always)

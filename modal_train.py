@@ -10,6 +10,7 @@ image = modal.Image.debian_slim(python_version="3.13").uv_pip_install(
 
 volume = modal.Volume.from_name("smellycode-data", create_if_missing=True)
 cache_volume = modal.Volume.from_name("smellycode-cache", create_if_missing=True)
+onnx_volume = modal.Volume.from_name("smellycode-onnx", create_if_missing=True)
 app = modal.App("code-smell-detection")
 
 # Local directory for storing ONNX models downloaded from Modal
@@ -18,7 +19,7 @@ LOCAL_ONNX_DIR = Path(__file__).parent / "artifacts" / "onnx_models"
 
 @app.function(
     image=image,
-    volumes={"/mnt/data": volume,"/app/cache": cache_volume},
+    volumes={"/mnt/data": volume,"/app/cache": cache_volume, "/artifacts": onnx_volume},
     secrets=[modal.Secret.from_name("wandb-secret")],
     gpu="T4",
     timeout=7200,
@@ -31,10 +32,6 @@ def train_modal(cross_type="standard", deep_type="bottleneck", tiny=False,
                 use_semantic=False, fusion_type="gated", embed_dim=128, max_length=512,
                 wandb_project="smellycode-dcnv2", wandb_entity=None):
     import sys
-    from modal import Volume
-    
-    # Create a local volume for ONNX export artifacts that will be downloaded
-    onnx_volume = modal.Volume.from_name("smellycode-onnx", create_if_missing=True)
     
     sys.argv = [
         "train.py",
@@ -73,6 +70,7 @@ def train_modal(cross_type="standard", deep_type="bottleneck", tiny=False,
     # Commit volume changes after training completes
     if export_onnx:
         onnx_volume.commit()
+        print("ONNX models committed to Modal volume 'smellycode-onnx'")
     
     return result
 
@@ -133,16 +131,15 @@ def train(
         LOCAL_ONNX_DIR.mkdir(parents=True, exist_ok=True)
         
         # Access the onnx volume to download files
-        onnx_volume = modal.Volume.from_name("smellycode-onnx", create_if_missing=True)
         onnx_volume.reload()
         
         # List all directories in the volume's artifacts folder
         try:
-            artifacts_entries = list(onnx_volume.iterdir("artifacts"))
+            artifacts_entries = list(onnx_volume.iterdir("/artifacts"))
             for entry in artifacts_entries:
                 if entry.name.startswith("onnx_export_seed"):
                     # List files in this export directory
-                    export_dir = f"artifacts/{entry.name}"
+                    export_dir = f"/artifacts/{entry.name}"
                     files = list(onnx_volume.iterdir(export_dir))
                     for file_entry in files:
                         if file_entry.name.endswith('.onnx'):

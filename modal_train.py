@@ -1,6 +1,7 @@
 import os
 import modal
 from pathlib import Path
+import shutil
 
 image = modal.Image.debian_slim(python_version="3.13").uv_pip_install(
     "torch", "polars", "scikit-learn", "tqdm", "numpy", "transformers", "modal", "iterative-stratification","wandb","matplotlib",
@@ -10,6 +11,9 @@ image = modal.Image.debian_slim(python_version="3.13").uv_pip_install(
 volume = modal.Volume.from_name("smellycode-data", create_if_missing=True)
 cache_volume = modal.Volume.from_name("smellycode-cache", create_if_missing=True)
 app = modal.App("code-smell-detection")
+
+# Local directory for storing ONNX models downloaded from Modal
+LOCAL_ONNX_DIR = Path(__file__).parent / "artifacts" / "onnx_models"
 
 
 @app.function(
@@ -27,6 +31,11 @@ def train_modal(cross_type="standard", deep_type="bottleneck", tiny=False,
                 use_semantic=False, fusion_type="gated", embed_dim=128, max_length=512,
                 wandb_project="smellycode-dcnv2", wandb_entity=None):
     import sys
+    from modal import Volume
+    
+    # Create a local volume for ONNX export artifacts that will be downloaded
+    onnx_volume = modal.Volume.from_name("smellycode-onnx", create_if_missing=True)
+    
     sys.argv = [
         "train.py",
         f"--cross_type={cross_type}",
@@ -59,7 +68,13 @@ def train_modal(cross_type="standard", deep_type="bottleneck", tiny=False,
     if wandb_entity:
         sys.argv.append(f"--wandb_entity={wandb_entity}")
     from train import main
-    main()
+    result = main()
+    
+    # Commit volume changes after training completes
+    if export_onnx:
+        onnx_volume.commit()
+    
+    return result
 
 
 @app.local_entrypoint()
@@ -106,9 +121,47 @@ def train(
         )
         for ct, dt in combos
     ]
+    
+    # Wait for all jobs to complete
     for (ct, dt), job in zip(combos, jobs):
         job.get()
         print(f"[{ct}+{dt}] done")
+    
+    # Download ONNX models from Modal volume to local directory
+    if export_onnx:
+        print("\nDownloading ONNX models from Modal to local...")
+        LOCAL_ONNX_DIR.mkdir(parents=True, exist_ok=True)
+        
+        # Access the onnx volume to download files
+        onnx_volume = modal.Volume.from_name("smellycode-onnx", create_if_missing=True)
+        onnx_volume.reload()
+        
+        # List all directories in the volume's artifacts folder
+        try:
+            artifacts_entries = list(onnx_volume.iterdir("artifacts"))
+            for entry in artifacts_entries:
+                if entry.name.startswith("onnx_export_seed"):
+                    # List files in this export directory
+                    export_dir = f"artifacts/{entry.name}"
+                    files = list(onnx_volume.iterdir(export_dir))
+                    for file_entry in files:
+                        if file_entry.name.endswith('.onnx'):
+                            # Read file from volume
+                            file_content = b''
+                            for chunk in onnx_volume.read_file(f"{export_dir}/{file_entry.name}"):
+                                file_content += chunk
+                            
+                            # Save locally with unique name
+                            local_target = LOCAL_ONNX_DIR / f"{entry.name}_{file_entry.name}"
+                            with open(local_target, 'wb') as f:
+                                f.write(file_content)
+                            print(f"  Downloaded: {export_dir}/{file_entry.name} -> {local_target}")
+        except Exception as e:
+            print(f"Note: Could not auto-download ONNX files: {e}")
+            print(f"ONNX models are stored in Modal volume 'smellycode-onnx'")
+            print(f"You can access them via: modal volume get smellycode-onnx /artifacts --output {LOCAL_ONNX_DIR}")
+        
+        print(f"\nONNX models saved locally to: {LOCAL_ONNX_DIR}")
 
 
 @app.function(image=image, volumes={"/mnt/data": volume}, timeout=600)
